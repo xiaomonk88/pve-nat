@@ -15,7 +15,7 @@
 #   /etc/pve-nat/hosts.db      虚拟机名缓存 IP|名称（自动识别）
 
 # 发布新版本时递增此版本号，客户端据此判断是否需要更新
-VERSION="8.1.0"
+VERSION="8.1.1"
 UPDATE_URL="https://raw.githubusercontent.com/xiaomonk88/pve-nat/main/pve-nat.sh"
 SCRIPT_MARK="# PVE NAT Port Forward Manager"
 CONFIG="/etc/pve-nat.conf"
@@ -354,10 +354,12 @@ migrate_v7(){
     fi
 
     # V7 靠 iptables-restore 恢复整表来持久化内网上网规则（MASQUERADE + FORWARD 放行），
-    # V8 不再恢复整表，所以检测到内网 MASQUERADE 就接管，避免重启后虚拟机断网。
-    # 即使 interfaces 里也配置了，规则重复一份也无害。
+    # V8 不再恢复整表：规则已写在 interfaces 里就不用管；否则检测到内网 MASQUERADE 就接管，
+    # 避免重启后虚拟机断网。
     masq_rule=$(lan_masq_rule)
-    if [ -n "$masq_rule" ]; then
+    if masq_in_interfaces; then
+        echo "内网上网规则已在 /etc/network/interfaces 中配置，无需接管"
+    elif [ -n "$masq_rule" ]; then
         src=$(awk '{for(i=1;i<=NF;i++) if($i=="-s") print $(i+1)}' <<< "$masq_rule")
         [ -z "$src" ] && src=$(lan_subnet_detect)
         if [ -n "$src" ]; then
@@ -617,15 +619,34 @@ lan_masq_rule(){
         }'
 }
 
+# 内网上网规则（MASQUERADE + FORWARD 放行）是否已写在 /etc/network/interfaces 的 post-up 中
+# （按部署手册配置的机器都是这样，开机由 networking 自动加载，无需本脚本接管）
+masq_in_interfaces(){
+    local sub files rules pat
+    files=$(ls /etc/network/interfaces /etc/network/interfaces.d/* 2>/dev/null)
+    [ -n "$files" ] || return 1
+    rules=$(grep -hE '^[[:space:]]*post-up[[:space:]].*iptables' $files 2>/dev/null)
+    [ -n "$rules" ] || return 1
+    sub=$(lan_subnet_detect)
+    pat="-o $PUBLIC_IF( |\$)"
+    [ -n "$sub" ] && pat="(-s ${sub//./\\.}|-o $PUBLIC_IF)( |\$)"
+    grep -- '-j MASQUERADE' <<< "$rules" | grep -qE -- "$pat" || return 1
+    grep -- 'FORWARD' <<< "$rules" | grep -- "-i $LAN_IF " | grep -q -- '-j ACCEPT'
+}
+
 settings(){
-    local c v fwd masq_ext masq_txt sub
+    local c v fwd masq_ext masq_txt sub in_ifaces
     while true; do
         fwd=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)
         masq_ext=$(lan_masq_rule)
+        in_ifaces=0; masq_in_interfaces && in_ifaces=1
         if [ "$MASQ" = "yes" ]; then
             masq_txt="${C_G}由本脚本管理${C_0}（$LAN_SUBNET）"
+            [ "$in_ifaces" = 1 ] && masq_txt+="${C_D}，interfaces 中也有相同规则${C_0}"
+        elif [ "$in_ifaces" = 1 ]; then
+            masq_txt="${C_G}已配置${C_0}（/etc/network/interfaces，开机自动生效）"
         elif [ -n "$masq_ext" ]; then
-            masq_txt="${C_Y}外部规则${C_0}（重启后可能丢失，建议交给本脚本管理）"
+            masq_txt="${C_Y}外部规则${C_0}（未持久化，重启后可能丢失，建议交给本脚本管理）"
         else
             masq_txt="${C_R}未配置${C_0}（虚拟机无法上网）"
         fi
@@ -672,11 +693,17 @@ settings(){
                 ;;
             4)
                 if [ "$MASQ" = "yes" ]; then
-                    msg_warn "关闭后若没有其他规则兜底，虚拟机将无法上网"
+                    if [ "$in_ifaces" = 1 ]; then
+                        echo "/etc/network/interfaces 中已有相同规则，开机会自动加载，本脚本的这份是重复的，可以放心关闭。"
+                    else
+                        msg_warn "关闭后若没有其他规则兜底，虚拟机将无法上网"
+                    fi
                     read -rp "关闭本脚本管理的内网上网规则? [y/N]: " v
                     if [[ "$v" =~ ^[Yy]$ ]]; then
                         MASQ="no"; save_config; apply_rules && msg_ok "已关闭"
                     fi
+                elif [ "$in_ifaces" = 1 ]; then
+                    msg_ok "内网上网规则已在 /etc/network/interfaces 中配置，开机自动生效，无需处理"
                 else
                     [ -n "$masq_ext" ] && echo "当前外部规则: $masq_ext"
                     sub=$(lan_subnet_detect)

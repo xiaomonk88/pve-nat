@@ -20,7 +20,15 @@
 curl -fsSL https://raw.githubusercontent.com/xiaomonk88/pve-nat/main/pve-nat.sh -o /usr/local/sbin/pve-nat && chmod +x /usr/local/sbin/pve-nat && pve-nat
 ```
 
-安装后随时输入 `pve-nat` 打开菜单。**更新**也是执行同一条命令，已有规则不受影响。
+安装后随时输入 `pve-nat` 打开菜单。
+
+## 自动更新
+
+- 每次打开 `pve-nat` 菜单时自动检查 GitHub 最新版本（最多等待 3 秒，网络不通则跳过），有新版本时提示，回车即更新并自动重启进入新版
+- 菜单 `8. 检查更新` 可手动检查
+- `pve-nat --update` 命令行直接更新（不询问，适合批量操作）
+- 开机恢复（`--apply`）**不联网**，不会自动更新
+- 更新前会校验下载内容的语法和版本号，只升级不降级；规则数据不受影响
 
 ## 功能
 
@@ -33,6 +41,7 @@ curl -fsSL https://raw.githubusercontent.com/xiaomonk88/pve-nat/main/pve-nat.sh 
 | 5. 刷新虚拟机名称 | 自动识别 IP 对应的 PVE 虚拟机/容器（结果缓存，虚拟机关机也能显示） |
 | 6. 查看原始 iptables 规则 | |
 | 7. 系统设置 | 公网/内网接口、开启 IP 转发、内网上网（MASQUERADE） |
+| 8. 检查更新 | 从 GitHub 更新到最新版本 |
 
 ## 工作方式
 

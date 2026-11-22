@@ -1,19 +1,23 @@
 #!/bin/bash
-# PVE NAT Port Forward Manager V8
+# PVE NAT Port Forward Manager
 #
 # 一键安装:
 #   curl -fsSL https://raw.githubusercontent.com/xiaomonk88/pve-nat/main/pve-nat.sh -o /usr/local/sbin/pve-nat && chmod +x /usr/local/sbin/pve-nat && pve-nat
 #
 # 用法:
-#   pve-nat              交互菜单
-#   pve-nat --apply      按数据库重建 iptables 规则（开机服务调用）
+#   pve-nat              交互菜单（启动时自动检查更新）
+#   pve-nat --update     从 GitHub 更新到最新版本
+#   pve-nat --apply      按数据库重建 iptables 规则（开机服务调用，不联网）
 #
 # 数据文件:
 #   /etc/pve-nat.conf          接口配置
 #   /etc/pve-nat/rules.db      转发规则  公网端口|协议|目标IP|目标端口|备注
 #   /etc/pve-nat/hosts.db      虚拟机名缓存 IP|名称（自动识别）
 
-VERSION="V8"
+# 发布新版本时递增此版本号，客户端据此判断是否需要更新
+VERSION="8.1.0"
+UPDATE_URL="https://raw.githubusercontent.com/xiaomonk88/pve-nat/main/pve-nat.sh"
+SCRIPT_MARK="# PVE NAT Port Forward Manager"
 CONFIG="/etc/pve-nat.conf"
 DATA_DIR="/etc/pve-nat"
 DB="$DATA_DIR/rules.db"
@@ -692,6 +696,71 @@ settings(){
     done
 }
 
+# ======================= 自动更新 =======================
+
+# $1 是否比 $2 新
+ver_gt(){ [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]; }
+
+# 下载最新版到 $1 并校验，成功时把远程版本号写入 REMOTE_VERSION
+fetch_latest(){
+    local tmp=$1 timeout=$2
+    REMOTE_VERSION=""
+    command -v curl >/dev/null 2>&1 || return 1
+    curl -fsSL --connect-timeout "$timeout" --max-time $((timeout * 5)) \
+        "$UPDATE_URL?t=$(date +%s)" -o "$tmp" 2>/dev/null || return 1
+    head -5 "$tmp" | grep -qF "$SCRIPT_MARK" || return 1
+    bash -n "$tmp" 2>/dev/null || return 1
+    REMOTE_VERSION=$(grep -m1 '^VERSION=' "$tmp" | cut -d'"' -f2)
+    # 只认 x.y.z 数字格式（旧版 "V8" 等格式一律视为无效，防止误降级）
+    [[ "$REMOTE_VERSION" =~ ^[0-9]+(\.[0-9]+)*$ ]]
+}
+
+# 用法: do_update quiet|manual|force
+#   quiet   启动时自动检查：失败或已是最新时不输出，有新版本时询问（默认更新）
+#   manual  菜单手动检查：输出检查结果，有新版本时询问
+#   force   命令行 --update：有新版本直接更新
+do_update(){
+    local mode=$1 tmp ok timeout=10
+    [ "$mode" = "quiet" ] && timeout=3
+    tmp=$(mktemp)
+
+    [ "$mode" != "quiet" ] && echo "正在检查更新..."
+    if ! fetch_latest "$tmp" "$timeout"; then
+        rm -f "$tmp"
+        [ "$mode" != "quiet" ] && msg_err "无法获取最新版本（网络不通或 GitHub 访问失败）"
+        return 1
+    fi
+    if ! ver_gt "$REMOTE_VERSION" "$VERSION"; then
+        rm -f "$tmp"
+        [ "$mode" != "quiet" ] && msg_ok "已是最新版本 $VERSION"
+        return 1
+    fi
+
+    echo
+    echo "${C_Y}★ 发现新版本 $REMOTE_VERSION（当前 $VERSION）${C_0}"
+    if [ "$mode" != "force" ]; then
+        read -rp "立即更新? [Y/n]: " ok
+        if [[ "$ok" =~ ^[Nn] ]]; then rm -f "$tmp"; return 1; fi
+    fi
+
+    # 先写新文件再 rename，正在运行的旧脚本不受影响
+    if install -m 755 "$tmp" "$BIN.new" && mv -f "$BIN.new" "$BIN"; then
+        rm -f "$tmp"
+        msg_ok "已更新到 $REMOTE_VERSION"
+    else
+        rm -f "$tmp" "$BIN.new"
+        msg_err "更新失败，无法写入 $BIN"
+        return 1
+    fi
+
+    if [ "$mode" = "force" ]; then
+        "$BIN" --apply && msg_ok "规则已按新版本重建"
+        exit 0
+    fi
+    sleep 1
+    exec "$BIN"
+}
+
 # ======================= 入口 =======================
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -709,6 +778,15 @@ if [ "$1" = "--apply" ]; then
     apply_rules
     exit $?
 fi
+
+case "$1" in
+    --update) do_update force; exit $? ;;
+    "") ;;
+    *) echo "用法: pve-nat [--update | --apply]"; exit 1 ;;
+esac
+
+# 启动时自动检查更新（有新版本会询问，更新后自动重启进入新版）
+do_update quiet
 
 migrate_v7; rc=$?
 if [ "$rc" -eq 2 ]; then
@@ -728,7 +806,7 @@ while true; do
     host_count=$(unique_ips | grep -c .)
     clear
     echo "========================================"
-    echo " PVE NAT 端口转发管理 $VERSION"
+    echo " PVE NAT 端口转发管理 V$VERSION"
     echo "========================================"
     echo " 公网接口: $PUBLIC_IF    内网接口: $LAN_IF"
     echo " ${host_count} 台虚拟机 / ${RULE_COUNT} 条转发"
@@ -742,6 +820,7 @@ while true; do
     echo " 5. 刷新虚拟机名称（自动识别）"
     echo " 6. 查看原始 iptables 规则"
     echo " 7. 系统设置"
+    echo " 8. 检查更新"
     echo " 0. 退出"
     echo
     read -rp "请选择: " C
@@ -754,6 +833,7 @@ while true; do
         5) refresh_hosts; pause ;;
         6) show_raw; pause ;;
         7) settings ;;
+        8) do_update manual; pause ;;
         0|q) exit 0 ;;
     esac
 done

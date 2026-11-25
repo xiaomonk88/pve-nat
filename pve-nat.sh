@@ -15,7 +15,7 @@
 #   /etc/pve-nat/hosts.db      虚拟机名缓存 IP|名称（自动识别）
 
 # 发布新版本时递增此版本号，客户端据此判断是否需要更新
-VERSION="8.1.1"
+VERSION="8.1.2"
 UPDATE_URL="https://raw.githubusercontent.com/xiaomonk88/pve-nat/main/pve-nat.sh"
 SCRIPT_MARK="# PVE NAT Port Forward Manager"
 CONFIG="/etc/pve-nat.conf"
@@ -36,6 +36,11 @@ if [ -t 1 ]; then
     C_R=$'\e[31m'; C_G=$'\e[32m'; C_Y=$'\e[33m'; C_C=$'\e[36m'
     C_D=$'\e[90m'; C_B=$'\e[1m'; C_0=$'\e[0m'
 fi
+
+# 所有 iptables 调用都等待 xtables 锁（最多 30 秒）。
+# 开机时 pve-firewall 正在更新规则会占用锁，不加 -w 会直接失败（实际踩过：FORWARD 跳转没加上）
+iptables(){ command iptables -w 30 "$@"; }
+iptables-restore(){ command iptables-restore -w 30 "$@"; }
 
 msg_ok(){   echo "${C_G}✔ $*${C_0}"; }
 msg_err(){  echo "${C_R}✘ $*${C_0}"; }
@@ -280,9 +285,15 @@ EOF
         return 1
     fi
 
-    iptables -t nat -C PREROUTING  -j $CH_DNAT 2>/dev/null || iptables -t nat -I PREROUTING 1 -j $CH_DNAT
-    iptables -t nat -C POSTROUTING -j $CH_POST 2>/dev/null || iptables -t nat -I POSTROUTING 1 -j $CH_POST
-    iptables        -C FORWARD     -j $CH_FWD  2>/dev/null || iptables -I FORWARD 1 -j $CH_FWD
+    local jt jc jj jfail=0
+    for j in "nat PREROUTING $CH_DNAT" "nat POSTROUTING $CH_POST" "filter FORWARD $CH_FWD"; do
+        read -r jt jc jj <<< "$j"
+        iptables -t "$jt" -C "$jc" -j "$jj" 2>/dev/null && continue
+        if ! iptables -t "$jt" -I "$jc" 1 -j "$jj"; then
+            msg_err "无法添加跳转规则: $jt/$jc -> $jj"; jfail=1
+        fi
+    done
+    [ "$jfail" = 0 ] || return 1
 
     # 系统装了 netfilter-persistent 时同步保存，避免开机恢复出旧规则
     if command -v netfilter-persistent >/dev/null 2>&1; then
